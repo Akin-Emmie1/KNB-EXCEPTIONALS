@@ -1,0 +1,14 @@
+name = "kmb-exceptionals-api"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "knb-enterprise-db"
+database_id = "278d5dc9-f097-4094-91e2-6718ace14daa"
+migrations_dir = "migrations"
+
+[vars]
+BUSINESS_TIMEZONE = "Africa/Lagos"
+SESSION_TTL_HOURS = "12"
