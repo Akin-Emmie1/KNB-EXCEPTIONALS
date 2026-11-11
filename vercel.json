@@ -1,0 +1,9 @@
+
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://knb-exceptionals.akinwumiemmanuel442.workers.dev/api/:path*"
+    }
+  ]
+}
