@@ -3,6 +3,10 @@ const ACTIVE_APPOINTMENT_STATUSES = ["pending", "confirmed"];
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_TIMEZONE = "Africa/Lagos";
 const PASSWORD_ITERATIONS = 210000;
+const INITIAL_ADMIN_EMAIL = "iderakayode@gmail.com";
+const STOREFRONT_ORIGIN = "https://knb-exceptional.vercel.app";
+const CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+const CORS_HEADERS = ["content-type"];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -66,6 +70,20 @@ async function verifyPassword(password, encoded) {
   }
 }
 
+async function encodePassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await hashPassword(password, salt);
+  return `pbkdf2$${PASSWORD_ITERATIONS}$${bytesToBase64Url(salt)}$${bytesToBase64Url(hash)}`;
+}
+
+async function verifySetupKey(candidate, expected) {
+  const [candidateHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(candidate)),
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(expected))
+  ]);
+  return timingSafeEqual(new Uint8Array(candidateHash), new Uint8Array(expectedHash));
+}
+
 async function digestToken(token) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return bytesToBase64Url(new Uint8Array(digest));
@@ -85,32 +103,36 @@ function cookieHeader(value, maxAge) {
   return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
 }
 
-function checkOrigin(request, env) {
-  const origin = request.headers.get("Origin");
-  if (!origin) throw new HttpError(403, "A same-origin request is required.");
+function originAllowed(origin, request, env) {
+  if (!origin) return false;
   let parsed;
   try {
     parsed = new URL(origin);
   } catch {
-    throw new HttpError(403, "A same-origin request is required.");
+    return false;
   }
-  const allowed = new Set((env.ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean));
-  if (parsed.origin !== new URL(request.url).origin && !allowed.has(parsed.origin)) {
-    throw new HttpError(403, "This origin is not allowed.");
-  }
-  return parsed.origin;
+  if (parsed.origin !== origin) return false;
+  const allowed = new Set([
+    STOREFRONT_ORIGIN,
+    ...(env.ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean)
+  ]);
+  return parsed.origin === new URL(request.url).origin || allowed.has(parsed.origin);
+}
+
+function checkOrigin(request, env) {
+  const origin = request.headers.get("Origin");
+  if (!origin) throw new HttpError(403, "A same-origin request is required.");
+  if (!originAllowed(origin, request, env)) throw new HttpError(403, "This origin is not allowed.");
+  return origin;
 }
 
 function corsHeaders(request, env) {
   const origin = request.headers.get("Origin");
-  if (!origin) return {};
-  const sameOrigin = new URL(origin).origin === new URL(request.url).origin;
-  const allowed = (env.ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean);
-  if (!sameOrigin && !allowed.includes(origin)) return {};
+  if (!originAllowed(origin, request, env)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": CORS_METHODS.join(", "),
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "600",
     "Vary": "Origin"
@@ -120,6 +142,11 @@ function corsHeaders(request, env) {
 function requireDb(env) {
   if (!env.DB) throw new HttpError(503, "The database is not configured.");
   return env.DB;
+}
+
+function setupKeyConfigured(env) {
+  return typeof env.ADMIN_SETUP_KEY === "string" &&
+    env.ADMIN_SETUP_KEY.length >= 32 && env.ADMIN_SETUP_KEY.length <= 256;
 }
 
 async function readJson(request) {
@@ -732,24 +759,53 @@ async function adminLogin(db, request, env) {
     throw new HttpError(400, "A valid password is required.");
   }
   const password = body.password;
-  let admin = await db.prepare("SELECT id, email, password_hash FROM admins WHERE email = ? AND is_active = 1")
+  const admin = await db.prepare("SELECT id, email, password_hash FROM admins WHERE email = ? AND is_active = 1")
     .bind(email).first();
-  if (!admin) {
-    const count = await db.prepare("SELECT COUNT(*) AS count FROM admins").first();
-    const bootstrapEmail = (env.ADMIN_EMAIL || "").trim().toLowerCase();
-    if (count?.count === 0 && bootstrapEmail && bootstrapEmail === email && env.ADMIN_PASSWORD_HASH &&
-        await verifyPassword(password, env.ADMIN_PASSWORD_HASH)) {
-      const id = randomId();
-      await db.prepare("INSERT INTO admins (id, email, password_hash) VALUES (?, ?, ?)")
-        .bind(id, email, env.ADMIN_PASSWORD_HASH).run();
-      admin = { id, email, password_hash: env.ADMIN_PASSWORD_HASH };
-    }
-  }
   if (!admin || !(await verifyPassword(password, admin.password_hash))) {
     throw new HttpError(401, "Email or password is incorrect.");
   }
   const session = await createSession(db, admin.id, env);
   return json({ admin: { id: admin.id, email: admin.email }, expiresAt: session.expiresAt }, 200, {
+    "Set-Cookie": cookieHeader(session.token, session.maxAge)
+  });
+}
+
+async function adminSetupStatus(db, env) {
+  const result = await db.prepare("SELECT COUNT(*) AS count FROM admins").first();
+  return json({
+    hasAdmin: Number(result?.count || 0) > 0,
+    setupConfigured: !Number(result?.count || 0) && setupKeyConfigured(env),
+    email: INITIAL_ADMIN_EMAIL
+  });
+}
+
+async function setupFirstAdmin(db, request, env) {
+  if (!setupKeyConfigured(env)) throw new HttpError(503, "First administrator setup is not configured.");
+  const current = await db.prepare("SELECT COUNT(*) AS count FROM admins").first();
+  if (Number(current?.count || 0) !== 0) throw new HttpError(409, "First administrator setup is already complete.");
+
+  const body = await readJson(request);
+  const email = validEmail(body.email, true);
+  if (email !== INITIAL_ADMIN_EMAIL) throw new HttpError(400, "Use the configured initial administrator email.");
+  if (typeof body.setupKey !== "string" || body.setupKey.length < 32 || body.setupKey.length > 256 ||
+      !(await verifySetupKey(body.setupKey, env.ADMIN_SETUP_KEY))) {
+    throw new HttpError(403, "The one-time setup key is invalid.");
+  }
+  if (typeof body.password !== "string" || body.password.length < 12 || body.password.length > 1024) {
+    throw new HttpError(400, "Choose a password with at least 12 characters.");
+  }
+
+  const passwordHash = await encodePassword(body.password);
+  const inserted = await db.prepare(`
+    INSERT INTO admins (id, email, password_hash)
+    SELECT ?, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM admins)
+    RETURNING id, email
+  `).bind(randomId(), email, passwordHash).first();
+  if (!inserted) throw new HttpError(409, "First administrator setup is already complete.");
+
+  const session = await createSession(db, inserted.id, env);
+  return json({ admin: { id: inserted.id, email: inserted.email }, expiresAt: session.expiresAt }, 201, {
     "Set-Cookie": cookieHeader(session.token, session.maxAge)
   });
 }
@@ -800,6 +856,8 @@ async function handleApi(request, env, url) {
     return json({ appointment: await createAppointment(db, await readJson(request)) }, 201);
   }
 
+  if (path === "/api/admin/auth/setup-status" && method === "GET") return adminSetupStatus(db, env);
+  if (path === "/api/admin/auth/setup" && method === "POST") return setupFirstAdmin(db, request, env);
   if (path === "/api/admin/auth/login" && method === "POST") return adminLogin(db, request, env);
   if (path === "/api/admin/auth/logout" && method === "POST") {
     const token = cookieValue(request, SESSION_COOKIE);
@@ -982,6 +1040,18 @@ export default {
     const url = new URL(request.url);
     const cors = corsHeaders(request, env);
     if (request.method === "OPTIONS") {
+      if (request.headers.get("Origin") && !cors["Access-Control-Allow-Origin"]) {
+        return json({ error: "This origin is not allowed." }, 403);
+      }
+      const requestedMethod = request.headers.get("Access-Control-Request-Method")?.toUpperCase();
+      if (requestedMethod && !CORS_METHODS.includes(requestedMethod)) {
+        return json({ error: "This request method is not allowed." }, 405, cors);
+      }
+      const requestedHeaders = (request.headers.get("Access-Control-Request-Headers") || "")
+        .split(",").map(value => value.trim().toLowerCase()).filter(Boolean);
+      if (requestedHeaders.some(header => !CORS_HEADERS.includes(header))) {
+        return json({ error: "A request header is not allowed." }, 400, cors);
+      }
       return new Response(null, { status: 204, headers: cors });
     }
     if (!url.pathname.startsWith("/api/")) return new Response("Not found.", { status: 404 });
