@@ -4,6 +4,9 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_TIMEZONE = "Africa/Lagos";
 const PASSWORD_ITERATIONS = 210000;
 const INITIAL_ADMIN_EMAIL = "iderakayode@gmail.com";
+const STOREFRONT_ORIGIN = "https://knb-exceptional.vercel.app";
+const CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+const CORS_HEADERS = ["content-type"];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -100,32 +103,36 @@ function cookieHeader(value, maxAge) {
   return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
 }
 
-function checkOrigin(request, env) {
-  const origin = request.headers.get("Origin");
-  if (!origin) throw new HttpError(403, "A same-origin request is required.");
+function originAllowed(origin, request, env) {
+  if (!origin) return false;
   let parsed;
   try {
     parsed = new URL(origin);
   } catch {
-    throw new HttpError(403, "A same-origin request is required.");
+    return false;
   }
-  const allowed = new Set((env.ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean));
-  if (parsed.origin !== new URL(request.url).origin && !allowed.has(parsed.origin)) {
-    throw new HttpError(403, "This origin is not allowed.");
-  }
-  return parsed.origin;
+  if (parsed.origin !== origin) return false;
+  const allowed = new Set([
+    STOREFRONT_ORIGIN,
+    ...(env.ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean)
+  ]);
+  return parsed.origin === new URL(request.url).origin || allowed.has(parsed.origin);
+}
+
+function checkOrigin(request, env) {
+  const origin = request.headers.get("Origin");
+  if (!origin) throw new HttpError(403, "A same-origin request is required.");
+  if (!originAllowed(origin, request, env)) throw new HttpError(403, "This origin is not allowed.");
+  return origin;
 }
 
 function corsHeaders(request, env) {
   const origin = request.headers.get("Origin");
-  if (!origin) return {};
-  const sameOrigin = new URL(origin).origin === new URL(request.url).origin;
-  const allowed = (env.ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean);
-  if (!sameOrigin && !allowed.includes(origin)) return {};
+  if (!originAllowed(origin, request, env)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": CORS_METHODS.join(", "),
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "600",
     "Vary": "Origin"
@@ -767,7 +774,7 @@ async function adminSetupStatus(db, env) {
   const result = await db.prepare("SELECT COUNT(*) AS count FROM admins").first();
   return json({
     hasAdmin: Number(result?.count || 0) > 0,
-    setupConfigured: !Number(result?.count || 0) && setupKeyConfigured(env),
+    setupConfigured: typeof env.ADMIN_SETUP_KEY === "string" && env.ADMIN_SETUP_KEY.length > 0,
     email: INITIAL_ADMIN_EMAIL
   });
 }
@@ -1033,6 +1040,18 @@ export default {
     const url = new URL(request.url);
     const cors = corsHeaders(request, env);
     if (request.method === "OPTIONS") {
+      if (request.headers.get("Origin") && !cors["Access-Control-Allow-Origin"]) {
+        return json({ error: "This origin is not allowed." }, 403);
+      }
+      const requestedMethod = request.headers.get("Access-Control-Request-Method")?.toUpperCase();
+      if (requestedMethod && !CORS_METHODS.includes(requestedMethod)) {
+        return json({ error: "This request method is not allowed." }, 405, cors);
+      }
+      const requestedHeaders = (request.headers.get("Access-Control-Request-Headers") || "")
+        .split(",").map(value => value.trim().toLowerCase()).filter(Boolean);
+      if (requestedHeaders.some(header => !CORS_HEADERS.includes(header))) {
+        return json({ error: "A request header is not allowed." }, 400, cors);
+      }
       return new Response(null, { status: 204, headers: cors });
     }
     if (!url.pathname.startsWith("/api/")) return new Response("Not found.", { status: 404 });
