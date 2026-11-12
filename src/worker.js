@@ -743,7 +743,7 @@ async function adminLogin(db, request, env) {
     .bind(email).first();
   const passwordMatches = admin ? await verifyPassword(password, admin.password_hash) : false;
   if (!admin || !passwordMatches) {
-    console.warn(`Admin login diagnostic ${JSON.stringify({ adminFound: Boolean(admin), passwordMatches })}`);
+    
     throw new HttpError(401, "Email or password is incorrect.");
   }
   const session = await createSession(db, admin.id, env);
