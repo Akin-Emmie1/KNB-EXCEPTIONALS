@@ -177,14 +177,12 @@
   <div id="loginView" class="login">
     <div class="panel">
       <div class="brand"><span class="brand-mark">KNB</span><span>KNB <strong>EXCEPTIONALS</strong></span></div>
-      <h1 id="loginTitle" style="margin-top:24px">Admin sign in</h1>
-      <p id="loginDescription" class="muted">Sign in with your KNB Exceptionals administrator account.</p>
+      <h1 style="margin-top:24px">Admin sign in</h1>
+      <p class="muted">Sign in with your KNB Exceptionals administrator account.</p>
       <form id="loginForm">
         <div class="field"><label for="loginEmail">Email</label><input id="loginEmail" type="email" value="iderakayode@gmail.com" autocomplete="username" required></div>
-        <div id="setupKeyField" class="field hidden"><label for="setupKey">One-time setup key</label><input id="setupKey" type="password" autocomplete="one-time-code" minlength="32" maxlength="256"></div>
-        <div class="field"><label id="loginPasswordLabel" for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required></div>
-        <div id="confirmPasswordField" class="field hidden"><label for="confirmPassword">Confirm password</label><input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></div>
-        <button id="loginSubmit" class="btn btn-primary" type="submit">Sign in</button>
+        <div class="field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" maxlength="1024" required></div>
+        <button class="btn btn-primary" type="submit">Sign in</button>
         <div id="loginMessage" class="notice error hidden" role="alert"></div>
       </form>
     </div>
@@ -338,7 +336,6 @@
     let appointments = [];
     let salonSettings = { timezone: "Africa/Lagos", openingHours: {}, slotIntervalMinutes: 30 };
     let businessSettings = {};
-    let authSetupLocked = false;
 
     const setMessage = (id, text, error = false) => {
       const element = $(id);
@@ -646,69 +643,22 @@
       if (id === "bookingsView") { try { await loadAppointments(); } catch (error) { setMessage("pageMessage", error.message, true); } }
     }
 
-    function configureAuthMode(status) {
-      const setupMode = !status.hasAdmin;
-      authSetupLocked = setupMode && !status.setupConfigured;
-      $("loginView").dataset.mode = setupMode ? "setup" : "login";
-      $("loginTitle").textContent = setupMode ? "Set up administrator" : "Admin sign in";
-      $("loginDescription").textContent = setupMode
-        ? "Create the first administrator account for KNB Exceptionals."
-        : "Sign in with your KNB Exceptionals administrator account.";
-      if (setupMode) $("loginEmail").value = status.email;
-      $("loginEmail").readOnly = setupMode;
-      $("setupKeyField").classList.toggle("hidden", !setupMode);
-      $("confirmPasswordField").classList.toggle("hidden", !setupMode);
-      $("loginPasswordLabel").textContent = setupMode ? "Choose password (12+ characters)" : "Password";
-      $("loginPassword").autocomplete = setupMode ? "new-password" : "current-password";
-      $("loginPassword").minLength = setupMode ? 12 : 1;
-      $("confirmPassword").minLength = 12;
-      $("setupKey").required = setupMode && status.setupConfigured;
-      $("setupKey").minLength = 32;
-      $("confirmPassword").required = setupMode && status.setupConfigured;
-      $("loginSubmit").textContent = setupMode ? "Create administrator account" : "Sign in";
-      $("loginSubmit").disabled = authSetupLocked;
-      if (authSetupLocked) {
-        setMessage("loginMessage", "First-time setup is locked until the one-time setup key is configured in the Cloudflare Worker settings.", true);
-      } else {
-        setMessage("loginMessage", "");
-      }
-    }
-
-    async function refreshAuthMode() {
-      configureAuthMode(await apiRequest("/admin/auth/setup-status"));
-    }
-
     async function init() {
       $("loginForm").addEventListener("submit", async event => {
         event.preventDefault(); setMessage("loginMessage", "");
         const button = event.currentTarget.querySelector("button[type=submit]"); button.disabled = true;
         try {
-          const setupMode = $("loginView").dataset.mode === "setup";
-          if (setupMode && $("loginPassword").value !== $("confirmPassword").value) {
-            throw new Error("The passwords do not match.");
-          }
-          const result = await apiRequest(setupMode ? "/admin/auth/setup" : "/admin/auth/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              email: $("loginEmail").value.trim(),
-              password: $("loginPassword").value,
-              ...(setupMode ? { setupKey: $("setupKey").value } : {})
-            })
-          });
-          if (setupMode) configureAuthMode({ hasAdmin: true, setupConfigured: false, email: result.admin.email });
+          const result = await apiRequest("/admin/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: $("loginEmail").value.trim(), password: $("loginPassword").value }) });
           $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("userEmail").textContent = result.admin.email; await loadData();
         } catch (error) {
           setMessage($("appView").classList.contains("hidden") ? "loginMessage" : "pageMessage", error.message, true);
         }
-        finally { button.disabled = authSetupLocked; }
+        finally { button.disabled = false; }
       });
       $("logoutBtn").addEventListener("click", async () => {
         try { await apiRequest("/admin/auth/logout", { method: "POST" }); }
         catch (error) { setMessage("pageMessage", error.message, true); return; }
-        $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden");
-        $("loginPassword").value = ""; $("confirmPassword").value = ""; $("setupKey").value = "";
-        try { await refreshAuthMode(); } catch (error) { setMessage("loginMessage", error.message, true); }
+        $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden"); $("loginPassword").value = "";
       });
       $("newProductBtn").onclick = () => openEditor(); $("closeEditorBtn").onclick = closeEditor;
       $("deleteFromFormBtn").onclick = () => { const product = products.find(item => item.id === $("productId").value); if (product) deleteProduct(product); };
@@ -725,9 +675,6 @@
       } catch (error) {
         if (error.message !== "Please sign in as an administrator." && error.message !== "Your administrator session has expired.") {
           setMessage($("appView").classList.contains("hidden") ? "loginMessage" : "pageMessage", error.message, true);
-        }
-        try { await refreshAuthMode(); } catch (setupError) {
-          setMessage("loginMessage", setupError.message, true);
         }
       }
     }

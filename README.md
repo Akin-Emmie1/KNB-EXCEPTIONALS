@@ -41,22 +41,25 @@ No R2 bucket, payment provider, or other paid service is required by this config
 
 ## Admin authentication
 
-The Worker retains server-side PBKDF2 password verification and D1-backed hashed sessions. Do not place administrator credentials in frontend files.
+The Worker verifies PBKDF2-SHA-256 password hashes and stores D1-backed sessions using the existing secure, HTTP-only cookie. To create the initial administrator or reset its password, open `create-admin.html` locally in a current browser:
 
-For initial setup, generate the password hash locally and set the one-time bootstrap values as Worker secrets:
+1. Enter and confirm a password of at least 12 characters. The standalone page uses browser Web Crypto locally; it makes no network requests and clears the password fields after generation.
+2. Select **Copy SQL**. The generated statement contains the password hash, so keep it private.
+3. In the Cloudflare dashboard, open **Workers & Pages → D1 SQL Database → knb-enterprise-db → Console**. Verify this is the existing production database, paste the generated `INSERT ... ON CONFLICT` statement, and execute it once. It creates the account if absent or replaces the password hash for the existing email. Do not run or reapply a migration.
+4. Open `/admin.html` and sign in using `iderakayode@gmail.com` and the password entered in the local page.
 
-```powershell
-node scripts/hash-password.mjs
-npx wrangler secret put ADMIN_EMAIL
-npx wrangler secret put ADMIN_PASSWORD_HASH
+The generated statement has this shape, with the page supplying a random ID and password hash:
+
+```sql
+INSERT INTO admins (id, email, password_hash, is_active)
+VALUES ('<random-uuid>', 'iderakayode@gmail.com', 'pbkdf2$210000$<base64url-salt>$<base64url-hash>', 1)
+ON CONFLICT(email COLLATE NOCASE) DO UPDATE SET
+  password_hash = excluded.password_hash,
+  is_active = 1,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 ```
 
-Provide the chosen administrator email and generated hash only at the prompts. After the first successful admin sign-in creates the D1 admin account, remove the bootstrap secrets:
-
-```powershell
-npx wrangler secret delete ADMIN_EMAIL
-npx wrangler secret delete ADMIN_PASSWORD_HASH
-```
+Do not replace the hash with a plaintext password. Keep the generated SQL/hash private and run the generator locally rather than publishing `create-admin.html` as a public website page. The admin page has no public first-admin registration; the Worker does not read or require `ADMIN_SETUP_KEY`.
 
 ## Static image workflow
 
