@@ -61,6 +61,8 @@
     .check-row input { width:auto; }
     .form-actions { display:flex; gap:9px; margin-top:18px; }
     .image-help { font-size:12px; color:var(--muted); }
+    .image-upload-row { display:flex; align-items:center; gap:8px; }
+    .image-upload-row input[type="file"] { min-width:0; flex:1; }
     .login { max-width:420px; margin:12vh auto; }
     .login .panel { padding:30px; }
     .login h1 { margin-bottom:7px; }
@@ -77,6 +79,7 @@
     @media (max-width:520px) { .hours-grid { grid-template-columns:1fr; } .hours-row { grid-template-columns:1fr auto 1fr 1fr; gap:5px; font-size:12px; } }
     @media (max-width:850px) { .workspace { grid-template-columns:1fr; } .stats { grid-template-columns:1fr 1fr; } .form-grid { grid-template-columns:1fr; } .field.full { grid-column:auto; } }
     @media (max-width:520px) { .topbar { padding:0 14px; } .main { padding:18px 14px; } .user-email { display:none; } .toolbar { align-items:stretch; flex-direction:column; } .search { width:100%; } .stats { grid-template-columns:1fr; } }
+    @media (max-width:520px) { .image-upload-row { align-items:stretch; flex-direction:column; } }
   </style>
   <style>
     :root {
@@ -229,8 +232,18 @@
               <div class="field"><label for="productOrigin">Origin</label><input id="productOrigin"></div>
               <div class="field full"><label for="productDescription">Short description</label><textarea id="productDescription"></textarea></div>
               <div class="field full"><label for="productLongDescription">Full description</label><textarea id="productLongDescription"></textarea></div>
-              <div class="field full"><label for="mainImage">Main image path</label><input id="mainImage" type="text" maxlength="2048" placeholder="/images/product-name.jpg"><span class="image-help">Enter a root-relative path to an image published with the website, or leave blank.</span></div>
-              <div class="field full"><label for="galleryImages">Additional image paths</label><textarea id="galleryImages" maxlength="81920" placeholder="/images/product-front.jpg&#10;/images/product-detail.jpg"></textarea><span class="image-help">Enter one root-relative website image path per line. Leave blank for no gallery images.</span></div>
+              <div class="field full">
+                <label for="mainImageFile">Main product image</label>
+                <div class="image-upload-row"><input id="mainImageFile" type="file" accept="image/jpeg,image/png,image/webp"><button id="attachMainImageBtn" class="btn btn-secondary btn-small" type="button">Attach image</button></div>
+                <span class="image-help">Choose a JPG, PNG, or WebP image up to 8 MB. Attaching it adds it to the website repository and starts a deployment.</span>
+                <label for="mainImage">Main image path</label><input id="mainImage" type="text" maxlength="2048" placeholder="/images/product-name.jpg">
+              </div>
+              <div class="field full">
+                <label for="galleryImageFiles">Additional product images</label>
+                <div class="image-upload-row"><input id="galleryImageFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple><button id="attachGalleryImagesBtn" class="btn btn-secondary btn-small" type="button">Attach images</button></div>
+                <span class="image-help">Choose up to 10 JPG, PNG, or WebP images (8 MB each, 20 MB total). They will be added in one website deployment.</span>
+                <label for="galleryImages">Additional image paths</label><textarea id="galleryImages" maxlength="81920" placeholder="/images/product-front.jpg&#10;/images/product-detail.jpg"></textarea>
+              </div>
               <div class="field full check-row"><label><input id="productInStock" type="checkbox" checked> In stock</label></div>
             </div>
 
@@ -331,6 +344,7 @@
     let categories = [];
     let services = [];
     let appointments = [];
+    let productImageUploadInProgress = false;
     let salonSettings = { timezone: "Africa/Lagos", openingHours: {}, slotIntervalMinutes: 30 };
     let businessSettings = {};
 
@@ -412,6 +426,7 @@
     }
 
     function openEditor(product = null) {
+      if (productImageUploadInProgress) return;
       $("editorPanel").classList.remove("hidden");
       $("editorTitle").textContent = product ? "Edit product" : "Add product";
       $("productForm").reset(); setMessage("formMessage", "");
@@ -433,10 +448,18 @@
       $("productName").focus();
     }
 
-    function closeEditor() { $("editorPanel").classList.add("hidden"); }
+    function closeEditor() {
+      if (productImageUploadInProgress) return;
+      $("editorPanel").classList.add("hidden");
+    }
 
     async function saveProduct(event) {
       event.preventDefault(); setMessage("formMessage", "");
+      if (productImageUploadInProgress) return;
+      if ($("mainImageFile").files.length || $("galleryImageFiles").files.length) {
+        setMessage("formMessage", "Attach the selected image files before saving the product.", true);
+        return;
+      }
       const id = $("productId").value;
       const old = products.find(product => product.id === id);
       try {
@@ -458,7 +481,59 @@
       } catch (error) { setMessage("formMessage", error.message, true); }
     }
 
+    async function attachProductImages(inputId, targetId, buttonId, gallery = false) {
+      if (productImageUploadInProgress) return;
+      const input = $(inputId);
+      const files = Array.from(input.files || []);
+      if (!files.length) {
+        setMessage("formMessage", "Choose one or more image files first.", true);
+        return;
+      }
+      const button = $(buttonId);
+      const existingPaths = gallery
+        ? $("galleryImages").value.split(/\r?\n/).map(path => path.trim()).filter(Boolean)
+        : [];
+      if (gallery && existingPaths.length + files.length > 40) {
+        setMessage("formMessage", "A product can have up to 40 additional images.", true);
+        return;
+      }
+      const originalLabel = button.textContent;
+      const buttons = [
+        $("attachMainImageBtn"), $("attachGalleryImagesBtn"),
+        $("productForm").querySelector('button[type="submit"]'),
+        $("closeEditorBtn"), $("deleteFromFormBtn"), $("newProductBtn")
+      ];
+      const wasDisabled = buttons.map(item => item.disabled);
+      productImageUploadInProgress = true;
+      buttons.forEach(item => { item.disabled = true; });
+      button.textContent = "Uploading…";
+      setMessage("formMessage", "");
+      try {
+        const formData = new FormData();
+        files.forEach(file => formData.append("files", file, file.name));
+        const result = await apiRequest("/admin/images", { method: "POST", body: formData });
+        const paths = (result.images || []).map(image => image.path);
+        if (paths.length !== files.length || paths.some(path => typeof path !== "string")) {
+          throw new Error("The server returned an invalid image upload result.");
+        }
+        if (gallery) {
+          $(targetId).value = [...new Set([...existingPaths, ...paths])].join("\n");
+        } else {
+          $(targetId).value = paths[0];
+        }
+        input.value = "";
+        setMessage("formMessage", `${paths.length} image${paths.length === 1 ? "" : "s"} attached. Save the product; the images will appear after the website deployment finishes.`);
+      } catch (error) {
+        setMessage("formMessage", error.message, true);
+      } finally {
+        productImageUploadInProgress = false;
+        buttons.forEach((item, index) => { item.disabled = wasDisabled[index]; });
+        button.textContent = originalLabel;
+      }
+    }
+
     async function deleteProduct(product) {
+      if (productImageUploadInProgress) return;
       if (!confirm("Delete “" + product.name + "”? This cannot be undone.")) return;
       try { await apiRequest("/admin/products/" + encodeURIComponent(product.id), { method: "DELETE" }); setMessage("pageMessage", "Product deleted."); closeEditor(); await loadData(); }
       catch (error) { setMessage("pageMessage", error.message, true); }
@@ -662,6 +737,8 @@
       });
       $("newProductBtn").onclick = () => openEditor(); $("closeEditorBtn").onclick = closeEditor;
       $("deleteFromFormBtn").onclick = () => { const product = products.find(item => item.id === $("productId").value); if (product) deleteProduct(product); };
+      $("attachMainImageBtn").addEventListener("click", () => attachProductImages("mainImageFile", "mainImage", "attachMainImageBtn"));
+      $("attachGalleryImagesBtn").addEventListener("click", () => attachProductImages("galleryImageFiles", "galleryImages", "attachGalleryImagesBtn", true));
       $("productForm").addEventListener("submit", saveProduct); $("searchInput").addEventListener("input", renderProducts);
       $("categoryForm").addEventListener("submit", addCategory); $("serviceForm").addEventListener("submit", saveService);
       $("resetServiceBtn").onclick = () => { $("serviceForm").reset(); $("serviceId").value = ""; $("serviceEditorTitle").textContent = "Add service"; setMessage("serviceMessage", ""); };

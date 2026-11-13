@@ -57,15 +57,26 @@ npx wrangler secret put GOOGLE_CLIENT_SECRET
 npx wrangler secret put ADMIN_SESSION_SECRET
 ```
 
-## Static image workflow
+## Product image uploads
 
-1. Add each approved product or salon service image file to the website repository so Cloudflare Pages publishes it.
-2. In Admin, enter the image’s **root-relative** website path, such as `/images/<actual-file-name>.jpg`. Use the real path and filename that exist in the deployed site; examples are placeholders, not supplied assets.
-3. For product galleries, enter one root-relative path per line. Leave image fields blank when there is no image.
-4. Save the product or service. The Worker validates that image paths are root-relative, contain no traversal segments, and end in `.jpg`, `.jpeg`, `.png`, or `.webp`; it stores them in the existing D1 image columns and returns those paths to the storefront.
-5. To replace or remove an image, update or clear its path in Admin and save. Add or remove the corresponding static asset in the website repository as needed.
+The Admin product form can attach a main image and multiple gallery images from the device. The authenticated Worker commits image files into the existing GitHub website repository under `images/`; the normal website deployment then publishes those static files. Image binaries are not stored in D1 or R2. The existing image-path fields remain available for assets already deployed with the site.
 
-File uploads are disabled; the `/api/admin/images` route remains present but responds that uploads are unavailable. The legacy `/api/media/*` route does not serve R2 files. Existing D1 R2 object keys will not display as static images; replace those references with verified static paths in Admin. No image filename or database record is assumed by this guide.
+Before using the attach buttons:
+
+1. Set the Worker variable `GITHUB_REPOSITORY` to the website repository as `owner/repository`, and `GITHUB_BRANCH` to the branch that triggers the website deployment (commonly `main`).
+2. Create a GitHub fine-grained personal access token limited to that repository. Grant **Contents: Read and write** and keep other permissions at their minimum. Store the token as the Worker secret `GITHUB_TOKEN`; never place it in this repository or frontend code.
+3. Deploy the Worker and updated Admin page. The attach buttons accept JPG, PNG, or WebP files, up to 8 MB each and 20 MB total per batch (at most 10 files). Gallery files are committed together so they trigger one website deployment.
+4. In Admin, choose the main image and select **Attach image**. For additional images, select one or more files and choose **Attach images**. Save the product after attaching. The images become available when the website deployment completes.
+
+Set the token secret with Wrangler if preferred:
+
+```powershell
+npx wrangler secret put GITHUB_TOKEN
+```
+
+Uploaded image files remain in the website repository if a product is deleted or its image is changed; remove unused files from the repository manually when appropriate. This route adds no separate image-storage service, but GitHub and the website host's repository, deployment, and usage limits still apply.
+
+The Worker validates manually entered image paths as root-relative website paths ending in `.jpg`, `.jpeg`, `.png`, or `.webp`. Existing D1 image keys that refer to unavailable R2 objects will not display; replace them with valid static website paths in Admin.
 
 ## Application behavior
 
