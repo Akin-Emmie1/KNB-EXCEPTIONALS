@@ -1,9 +1,11 @@
 const SESSION_COOKIE = "__Host-kmb_session";
+const OAUTH_COOKIE = "__Host-kmb_google_oauth";
 const ACTIVE_APPOINTMENT_STATUSES = ["pending", "confirmed"];
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_TIMEZONE = "Africa/Lagos";
-const PASSWORD_ITERATIONS = 210000;
 const STOREFRONT_ORIGIN = "https://knb-exceptional.vercel.app";
+const ADMIN_EMAIL = "iderakayode@gmail.com";
+const GOOGLE_REDIRECT_URI = `${STOREFRONT_ORIGIN}/api/admin/auth/google/callback`;
 const CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 const CORS_HEADERS = ["content-type"];
 
@@ -49,29 +51,8 @@ function timingSafeEqual(a, b) {
   return difference === 0;
 }
 
-async function hashPassword(password, salt, iterations = PASSWORD_ITERATIONS) {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256);
-  return new Uint8Array(bits);
-}
-
-async function verifyPassword(password, encoded) {
-  const parts = typeof encoded === "string" ? encoded.split("$") : [];
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
-  const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 100000 || iterations > 600000) return false;
-  try {
-    const expected = base64UrlToBytes(parts[3]);
-    const actual = await hashPassword(password, base64UrlToBytes(parts[2]), iterations);
-    return timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
-}
-
-async function digestToken(token) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  return bytesToBase64Url(new Uint8Array(digest));
+function randomToken(byteLength = 32) {
+  return bytesToBase64Url(crypto.getRandomValues(new Uint8Array(byteLength)));
 }
 
 function cookieValue(request, name) {
@@ -85,7 +66,235 @@ function cookieValue(request, name) {
 }
 
 function cookieHeader(value, maxAge) {
-  return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+  return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+function oauthCookieHeader(value, maxAge) {
+  return `${OAUTH_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+function clearOauthCookieHeader() {
+  return `${OAUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+}
+
+function redirectResponse(location, cookies = [], status = 303) {
+  const headers = new Headers({
+    "Location": location,
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff"
+  });
+  for (const cookie of cookies) headers.append("Set-Cookie", cookie);
+  return new Response(null, { status, headers });
+}
+
+function adminPageUrl(query = "") {
+  return `${STOREFRONT_ORIGIN}/admin.html${query ? `?${query}` : ""}`;
+}
+
+function googleOAuthConfig(env) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET ||
+      typeof env.ADMIN_SESSION_SECRET !== "string" || env.ADMIN_SESSION_SECRET.length < 32) {
+    throw new HttpError(503, "Google Sign-In is not configured on the Worker.");
+  }
+  const redirectUri = env.GOOGLE_REDIRECT_URI || GOOGLE_REDIRECT_URI;
+  let parsedRedirect;
+  try {
+    parsedRedirect = new URL(redirectUri);
+  } catch {
+    throw new HttpError(503, "The Google Sign-In callback URL is not configured correctly.");
+  }
+  if (parsedRedirect.origin !== STOREFRONT_ORIGIN ||
+      parsedRedirect.pathname !== "/api/admin/auth/google/callback" ||
+      parsedRedirect.search || parsedRedirect.hash) {
+    throw new HttpError(503, "The Google Sign-In callback URL is not configured correctly.");
+  }
+  return {
+    clientId: env.GOOGLE_CLIENT_ID,
+    clientSecret: env.GOOGLE_CLIENT_SECRET,
+    redirectUri,
+    sessionSecret: env.ADMIN_SESSION_SECRET
+  };
+}
+
+async function hmac(value, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return bytesToBase64Url(new Uint8Array(signature));
+}
+
+async function createSession(email, env) {
+  const config = googleOAuthConfig(env);
+  const ttlHours = Math.max(1, Math.min(8, Number(env.SESSION_TTL_HOURS) || 8));
+  const expiresAt = Math.floor(Date.now() / 1000) + ttlHours * 3600;
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ email, expiresAt })));
+  const token = `${payload}.${await hmac(payload, config.sessionSecret)}`;
+  return { token, maxAge: ttlHours * 3600 };
+}
+
+async function requireAdmin(request, env) {
+  const token = cookieValue(request, SESSION_COOKIE);
+  if (!token || token.length > 2048) throw new HttpError(401, "Please sign in as an administrator.");
+
+  const config = googleOAuthConfig(env);
+  const parts = token.split(".");
+  if (parts.length !== 2) throw new HttpError(401, "Your administrator session has expired.");
+  try {
+    const expectedSignature = await hmac(parts[0], config.sessionSecret);
+    if (!timingSafeEqual(new TextEncoder().encode(parts[1]), new TextEncoder().encode(expectedSignature))) {
+      throw new HttpError(401, "Your administrator session has expired.");
+    }
+    const claims = JSON.parse(new TextDecoder().decode(base64UrlToBytes(parts[0])));
+    if (claims.email !== ADMIN_EMAIL || !Number.isInteger(claims.expiresAt) ||
+        claims.expiresAt <= Math.floor(Date.now() / 1000)) {
+      throw new HttpError(401, "Your administrator session has expired.");
+    }
+    return { id: "google", email: ADMIN_EMAIL };
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(401, "Your administrator session has expired.");
+  }
+}
+
+async function verifyGoogleIdToken(idToken, nonce, clientId) {
+  const parts = idToken.split(".");
+  if (parts.length !== 3) throw new HttpError(401, "Google Sign-In could not be verified.");
+
+  let header;
+  let claims;
+  try {
+    header = JSON.parse(new TextDecoder().decode(base64UrlToBytes(parts[0])));
+    claims = JSON.parse(new TextDecoder().decode(base64UrlToBytes(parts[1])));
+  } catch {
+    throw new HttpError(401, "Google Sign-In could not be verified.");
+  }
+  if (header.alg !== "RS256" || typeof header.kid !== "string") {
+    throw new HttpError(401, "Google Sign-In could not be verified.");
+  }
+
+  const keyResponse = await fetch("https://www.googleapis.com/oauth2/v3/certs");
+  if (!keyResponse.ok) throw new HttpError(502, "Google Sign-In could not be verified.");
+  const keySet = await keyResponse.json();
+  const jwk = Array.isArray(keySet.keys)
+    ? keySet.keys.find(key => key.kid === header.kid && key.use === "sig")
+    : null;
+  if (!jwk) throw new HttpError(401, "Google Sign-In could not be verified.");
+
+  const publicKey = await crypto.subtle.importKey(
+    "jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]
+  );
+  const validSignature = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5",
+    publicKey,
+    base64UrlToBytes(parts[2]),
+    new TextEncoder().encode(`${parts[0]}.${parts[1]}`)
+  );
+  if (!validSignature) throw new HttpError(401, "Google Sign-In could not be verified.");
+  const audienceMatches = claims.aud === clientId ||
+    (Array.isArray(claims.aud) && claims.aud.includes(clientId) && claims.azp === clientId);
+  const issuerMatches = claims.iss === "https://accounts.google.com" || claims.iss === "accounts.google.com";
+  const now = Date.now() / 1000;
+  if (!issuerMatches || !audienceMatches ||
+      typeof claims.exp !== "number" || claims.exp <= now ||
+      typeof claims.iat !== "number" || claims.iat > now + 60 ||
+      claims.nonce !== nonce) {
+    throw new HttpError(401, "Google Sign-In could not be verified.");
+  }
+  if (claims.email_verified !== true ||
+      typeof claims.email !== "string" || claims.email.toLowerCase() !== ADMIN_EMAIL ||
+      typeof claims.sub !== "string" || !claims.sub) {
+    throw new HttpError(403, "Use the authorized Google account to sign in.");
+  }
+  return claims;
+}
+
+async function googleSignInStart(env) {
+  let config;
+  try {
+    config = googleOAuthConfig(env);
+  } catch (error) {
+    if (!(error instanceof HttpError) || error.status !== 503) throw error;
+    return redirectResponse(adminPageUrl("authError=setup"), [clearOauthCookieHeader()]);
+  }
+
+  const state = randomToken();
+  const nonce = randomToken();
+  const verifier = randomToken();
+  const challengeDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const challenge = bytesToBase64Url(new Uint8Array(challengeDigest));
+  const oauthState = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ state, nonce, verifier })));
+  const authorizeUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authorizeUrl.search = new URLSearchParams({
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    response_type: "code",
+    scope: "openid email",
+    state,
+    nonce,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    prompt: "select_account"
+  }).toString();
+  return redirectResponse(authorizeUrl.toString(), [oauthCookieHeader(oauthState, 600)], 302);
+}
+
+async function googleSignInCallback(request, env) {
+  const url = new URL(request.url);
+  const clearCookie = [clearOauthCookieHeader()];
+  try {
+    const config = googleOAuthConfig(env);
+    const oauthCookie = cookieValue(request, OAUTH_COOKIE);
+    const state = url.searchParams.get("state") || "";
+    const code = url.searchParams.get("code") || "";
+    if (url.searchParams.has("error")) throw new HttpError(401, "Google Sign-In was cancelled.");
+    if (!oauthCookie || !state || !code) throw new HttpError(401, "Google Sign-In could not be verified.");
+
+    let oauthState;
+    try {
+      oauthState = JSON.parse(new TextDecoder().decode(base64UrlToBytes(oauthCookie)));
+    } catch {
+      throw new HttpError(401, "Google Sign-In could not be verified.");
+    }
+    if (typeof oauthState.state !== "string" ||
+        !timingSafeEqual(new TextEncoder().encode(state), new TextEncoder().encode(oauthState.state)) ||
+        typeof oauthState.nonce !== "string" ||
+        typeof oauthState.verifier !== "string" ||
+        oauthState.verifier.length < 43 || oauthState.verifier.length > 128) {
+      throw new HttpError(401, "Google Sign-In could not be verified.");
+    }
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        redirect_uri: config.redirectUri,
+        grant_type: "authorization_code",
+        code_verifier: oauthState.verifier
+      })
+    });
+    if (!tokenResponse.ok) throw new HttpError(401, "Google Sign-In could not be verified.");
+    const tokenPayload = await tokenResponse.json();
+    if (typeof tokenPayload.id_token !== "string") {
+      throw new HttpError(401, "Google Sign-In could not be verified.");
+    }
+    const identity = await verifyGoogleIdToken(tokenPayload.id_token, oauthState.nonce, config.clientId);
+    const session = await createSession(identity.email.toLowerCase(), env);
+    return redirectResponse(adminPageUrl("auth=success"), [
+      cookieHeader(session.token, session.maxAge),
+      clearOauthCookieHeader()
+    ]);
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 500;
+    if (status >= 500) {
+      console.error("Google sign-in failed", { message: error.message });
+    }
+    const errorCode = status === 503 ? "setup" : status === 403 ? "account" : "google";
+    return redirectResponse(adminPageUrl(`authError=${errorCode}`), clearCookie);
+  }
 }
 
 function originAllowed(origin, request, env) {
@@ -457,20 +666,6 @@ async function createAppointment(db, body) {
   return { ...inserted, timezone: config.timezone };
 }
 
-async function requireAdmin(request, env) {
-  const token = cookieValue(request, SESSION_COOKIE);
-  if (!token || token.length > 200) throw new HttpError(401, "Please sign in as an administrator.");
-  const db = requireDb(env);
-  const tokenHash = await digestToken(token);
-  const session = await db.prepare(`
-    SELECT a.id, a.email
-    FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
-    WHERE s.token_hash = ? AND s.expires_at > ? AND a.is_active = 1
-  `).bind(tokenHash, new Date().toISOString()).first();
-  if (!session) throw new HttpError(401, "Your administrator session has expired.");
-  return session;
-}
-
 function settingValue(rows, key) {
   return rows.find(row => row.setting_key === key)?.setting_value || "";
 }
@@ -722,41 +917,23 @@ async function updateAppointment(db, id, body) {
   return updated;
 }
 
-async function createSession(db, adminId, env) {
-  const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
-  const token = bytesToBase64Url(tokenBytes);
-  const ttlHours = Math.max(1, Math.min(24, Number(env.SESSION_TTL_HOURS) || 12));
-  const expiresAt = new Date(Date.now() + ttlHours * 3600000).toISOString();
-  await db.prepare("INSERT INTO admin_sessions (token_hash, admin_id, expires_at) VALUES (?, ?, ?)")
-    .bind(await digestToken(token), adminId, expiresAt).run();
-  return { token, expiresAt, maxAge: ttlHours * 3600 };
-}
-
-async function adminLogin(db, request, env) {
-  const body = await readJson(request);
-  const email = validEmail(body.email, true);
-  if (typeof body.password !== "string" || !body.password.length || body.password.length > 1024) {
-    throw new HttpError(400, "A valid password is required.");
-  }
-  const password = body.password;
-  const admin = await db.prepare("SELECT id, email, password_hash FROM admins WHERE email = ? AND is_active = 1")
-    .bind(email).first();
-  const passwordMatches = admin ? await verifyPassword(password, admin.password_hash) : false;
-  if (!admin || !passwordMatches) {
-    
-    throw new HttpError(401, "Email or password is incorrect.");
-  }
-  const session = await createSession(db, admin.id, env);
-  return json({ admin: { id: admin.id, email: admin.email }, expiresAt: session.expiresAt }, 200, {
-    "Set-Cookie": cookieHeader(session.token, session.maxAge)
-  });
-}
-
 async function handleApi(request, env, url) {
-  const db = requireDb(env);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method.toUpperCase();
 
+  if (path === "/api/admin/auth/google/start" && method === "GET") return googleSignInStart(env);
+  if (path === "/api/admin/auth/google/callback" && method === "GET") return googleSignInCallback(request, env);
+  if (path === "/api/admin/auth/logout" && method === "POST") {
+    return json({ ok: true }, 200, {
+      "Set-Cookie": `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
+    });
+  }
+  if (path === "/api/admin/auth/session" && method === "GET") {
+    const admin = await requireAdmin(request, env);
+    return json({ admin });
+  }
+
+  const db = requireDb(env);
   if (path === "/api/health" && method === "GET") return json({ status: "ok" });
 
   if (path === "/api/products" && method === "GET") {
@@ -796,17 +973,6 @@ async function handleApi(request, env, url) {
   if (path === "/api/appointments" && method === "POST") {
     checkOrigin(request, env);
     return json({ appointment: await createAppointment(db, await readJson(request)) }, 201);
-  }
-
-  if (path === "/api/admin/auth/login" && method === "POST") return adminLogin(db, request, env);
-  if (path === "/api/admin/auth/logout" && method === "POST") {
-    const token = cookieValue(request, SESSION_COOKIE);
-    if (token) await db.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(await digestToken(token)).run();
-    return json({ ok: true }, 200, { "Set-Cookie": cookieHeader("", 0) });
-  }
-  if (path === "/api/admin/auth/session" && method === "GET") {
-    const admin = await requireAdmin(request, env);
-    return json({ admin });
   }
 
   const admin = await requireAdmin(request, env);
