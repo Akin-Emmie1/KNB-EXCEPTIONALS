@@ -65,6 +65,7 @@
     .login .panel { padding:30px; }
     .login h1 { margin-bottom:7px; }
     .login form { display:grid; gap:14px; margin-top:22px; }
+    .login-link { display:flex; align-items:center; justify-content:center; margin-top:22px; text-decoration:none; }
     .hidden { display:none !important; }
     .admin-nav { display:flex; gap:8px; margin:0 0 24px; overflow-x:auto; border-bottom:1px solid var(--line); }
     .admin-nav button { flex:0 0 auto; padding:12px 14px; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
@@ -178,13 +179,9 @@
     <div class="panel">
       <div class="brand"><span class="brand-mark">KNB</span><span>KNB <strong>EXCEPTIONALS</strong></span></div>
       <h1 style="margin-top:24px">Admin sign in</h1>
-      <p class="muted">Sign in with your KNB Exceptionals administrator account.</p>
-      <form id="loginForm">
-        <div class="field"><label for="loginEmail">Email</label><input id="loginEmail" type="email" value="iderakayode@gmail.com" autocomplete="username" required></div>
-        <div class="field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" maxlength="1024" required></div>
-        <button class="btn btn-primary" type="submit">Sign in</button>
-        <div id="loginMessage" class="notice error hidden" role="alert"></div>
-      </form>
+      <p class="muted">Continue with your authorized Google account.</p>
+      <a id="googleLoginBtn" class="btn btn-primary login-link" href="/api/admin/auth/google/start">Continue with Google</a>
+      <div id="loginMessage" class="notice error hidden" role="alert" aria-live="polite"></div>
     </div>
   </div>
 
@@ -644,21 +641,24 @@
     }
 
     async function init() {
-      $("loginForm").addEventListener("submit", async event => {
-        event.preventDefault(); setMessage("loginMessage", "");
-        const button = event.currentTarget.querySelector("button[type=submit]"); button.disabled = true;
-        try {
-          const result = await apiRequest("/admin/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: $("loginEmail").value.trim(), password: $("loginPassword").value }) });
-          $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("userEmail").textContent = result.admin.email; await loadData();
-        } catch (error) {
-          setMessage($("appView").classList.contains("hidden") ? "loginMessage" : "pageMessage", error.message, true);
-        }
-        finally { button.disabled = false; }
-      });
+      $("googleLoginBtn").href = API_BASE_URL + "/admin/auth/google/start";
+      const authQuery = new URLSearchParams(location.search);
+      const authError = authQuery.get("authError");
+      const authMessages = {
+        setup: "Google Sign-In is not configured yet. Configure the Worker OAuth settings.",
+        account: "Only iderakayode@gmail.com is authorized to sign in.",
+        google: "Google sign-in failed or expired. Please try again."
+      };
+      if (authError) {
+        setMessage("loginMessage", authMessages[authError] || authMessages.google, true);
+        history.replaceState(null, "", location.pathname);
+      } else if (authQuery.has("auth")) {
+        history.replaceState(null, "", location.pathname);
+      }
       $("logoutBtn").addEventListener("click", async () => {
         try { await apiRequest("/admin/auth/logout", { method: "POST" }); }
         catch (error) { setMessage("pageMessage", error.message, true); return; }
-        $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden"); $("loginPassword").value = "";
+        $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden");
       });
       $("newProductBtn").onclick = () => openEditor(); $("closeEditorBtn").onclick = closeEditor;
       $("deleteFromFormBtn").onclick = () => { const product = products.find(item => item.id === $("productId").value); if (product) deleteProduct(product); };
@@ -673,7 +673,7 @@
         $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("userEmail").textContent = session.admin.email;
         await loadData();
       } catch (error) {
-        if (error.message !== "Please sign in as an administrator." && error.message !== "Your administrator session has expired.") {
+        if (!authError && error.message !== "Please sign in as an administrator." && error.message !== "Your administrator session has expired.") {
           setMessage($("appView").classList.contains("hidden") ? "loginMessage" : "pageMessage", error.message, true);
         }
       }

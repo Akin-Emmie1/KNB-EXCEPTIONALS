@@ -41,25 +41,21 @@ No R2 bucket, payment provider, or other paid service is required by this config
 
 ## Admin authentication
 
-The Worker verifies PBKDF2-SHA-256 password hashes and stores D1-backed sessions using the existing secure, HTTP-only cookie. To create the initial administrator or reset its password, open `create-admin.html` locally in a current browser:
+Admin access uses Google OAuth and only accepts the verified Google account `iderakayode@gmail.com`. Authentication does not query D1; D1 remains in use for business data. The Worker issues an eight-hour, signed, secure, HTTP-only session cookie.
 
-1. Enter and confirm a password of at least 12 characters. The standalone page uses browser Web Crypto locally; it makes no network requests and clears the password fields after generation.
-2. Select **Copy SQL**. The generated statement contains the password hash, so keep it private.
-3. In the Cloudflare dashboard, open **Workers & Pages → D1 SQL Database → knb-enterprise-db → Console**. Verify this is the existing production database, paste the generated `INSERT ... ON CONFLICT` statement, and execute it once. It creates the account if absent or replaces the password hash for the existing email. Do not run or reapply a migration.
-4. Open `/admin.html` and sign in using `iderakayode@gmail.com` and the password entered in the local page.
+Before deploying the Worker:
 
-The generated statement has this shape, with the page supplying a random ID and password hash:
+1. In Google Cloud Console, configure an OAuth consent screen and add `iderakayode@gmail.com` as an allowed test user (or publish the app as appropriate).
+2. Create a **Web application** OAuth client and add this exact authorized redirect URI: `https://knb-exceptional.vercel.app/api/admin/auth/google/callback`.
+3. Configure `GOOGLE_CLIENT_ID` as a Worker variable. Set `GOOGLE_CLIENT_SECRET` and a randomly generated `ADMIN_SESSION_SECRET` (at least 32 characters) as Worker secrets. Never put secrets in this repository.
+4. Deploy the Worker and site. Open `/admin.html` and select **Continue with Google**.
 
-```sql
-INSERT INTO admins (id, email, password_hash, is_active)
-VALUES ('<random-uuid>', 'iderakayode@gmail.com', 'pbkdf2$210000$<base64url-salt>$<base64url-hash>', 1)
-ON CONFLICT(email COLLATE NOCASE) DO UPDATE SET
-  password_hash = excluded.password_hash,
-  is_active = 1,
-  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+Set the secrets with Wrangler if preferred:
+
+```powershell
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put ADMIN_SESSION_SECRET
 ```
-
-Do not replace the hash with a plaintext password. Keep the generated SQL/hash private and run the generator locally rather than publishing `create-admin.html` as a public website page. The admin page has no public first-admin registration; the Worker does not read or require `ADMIN_SETUP_KEY`.
 
 ## Static image workflow
 
@@ -73,7 +69,7 @@ File uploads are disabled; the `/api/admin/images` route remains present but res
 
 ## Application behavior
 
-- D1 stores product and category data, salon services and settings, administrator accounts and sessions, and appointments.
+- D1 stores product and category data, salon services and settings, and appointments. Admin authentication uses Google OAuth and signed Worker cookies, not D1.
 - Public bookings are pending until an administrator confirms them. Pending and confirmed appointments reserve the schedule; cancelled appointments release it. Salon time calculations use the configured timezone, initially `Africa/Lagos`.
 - The opening-hours schedule starts empty (closed). Configure the actual schedule in Admin before accepting bookings.
 - Checkout remains a WhatsApp enquiry. No payment processing or stored order system is configured.
