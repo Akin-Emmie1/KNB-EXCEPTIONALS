@@ -2,6 +2,9 @@ const SESSION_COOKIE = "__Host-kmb_session";
 const OAUTH_COOKIE = "__Host-kmb_google_oauth";
 const ACTIVE_APPOINTMENT_STATUSES = ["pending", "confirmed"];
 const MAX_JSON_BYTES = 1024 * 1024;
+const MAX_IMAGE_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_BATCH_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_BATCH_FILES = 10;
 const DEFAULT_TIMEZONE = "Africa/Lagos";
 const STOREFRONT_ORIGIN = "https://knb-exceptional.vercel.app";
 const ADMIN_EMAIL = "iderakayode@gmail.com";
@@ -793,6 +796,150 @@ async function deleteProduct(db, id) {
   if (!result.meta?.changes) throw new HttpError(404, "Product not found.");
 }
 
+function bytesToBase64(bytes) {
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+}
+
+function detectedImageType(bytes) {
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+    if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e &&
+              bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a &&
+              bytes[6] === 0x1a && bytes[7] === 0x0a) return "image/png";
+    if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 &&
+              bytes[2] === 0x46 && bytes[3] === 0x46 && bytes[8] === 0x57 &&
+              bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+    return "";
+}
+
+async function githubApiRequest(url, token, method = "GET", body = null) {
+    const response = await fetch(url, {
+          method,
+          headers: {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": `Bearer ${token}`,
+                  "User-Agent": "KNB-Admin-Image-Uploader",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  ...(body ? { "Content-Type": "application/json" } : {})
+          },
+          ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    const responseText = await response.text();
+    let payload = null;
+    if (responseText) {
+          try {
+                  payload = JSON.parse(responseText);
+          } catch {
+                  throw new HttpError(502, "GitHub returned an invalid response while saving images.");
+          }
+    }
+    if (!response.ok) {
+          console.error("GitHub image upload request failed", { status: response.status });
+          if (response.status === 401 || response.status === 403) {
+                  throw new HttpError(503, "The website repository token is invalid or does not have image upload permission.");
+          }
+          if (response.status === 404) {
+                  throw new HttpError(503, "The configured website repository or branch could not be found.");
+          }
+          if (response.status === 409 || response.status === 422) {
+                  throw new HttpError(409, "The website repository changed during upload. Please try attaching the images again.");
+          }
+          throw new HttpError(502, "GitHub could not save the selected images. Please try again.");
+    }
+    return payload || {};
+}
+
+async function uploadProductImages(request, env) {
+    const repository = typeof env.GITHUB_REPOSITORY === "string" ? env.GITHUB_REPOSITORY.trim() : "";
+    const branch = typeof env.GITHUB_BRANCH === "string" && env.GITHUB_BRANCH.trim()
+          ? env.GITHUB_BRANCH.trim()
+          : "main";
+    const token = typeof env.GITHUB_TOKEN === "string" ? env.GITHUB_TOKEN.trim() : "";
+    if (!token || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repository) ||
+              !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(branch)) {
+          throw new HttpError(503, "GitHub image uploads are not configured on the Worker.");
+    }
+    if (!(request.headers.get("Content-Type") || "").toLowerCase().startsWith("multipart/form-data")) {
+          throw new HttpError(400, "Choose image files to upload.");
+    }
+    const declaredLength = Number(request.headers.get("Content-Length") || 0);
+    if (declaredLength > MAX_IMAGE_BATCH_BYTES + 128 * 1024) {
+          throw new HttpError(413, "The selected images exceed the 20 MB total upload limit.");
+    }
+    let formData;
+    try {
+          formData = await request.formData();
+    } catch {
+          throw new HttpError(400, "The selected image upload could not be read.");
+    }
+    const files = formData.getAll("files");
+    if ([...formData.keys()].some(key => key !== "files") ||
+              !files.length || files.length > MAX_IMAGE_BATCH_FILES ||
+              files.some(file => typeof file === "string" || !file || typeof file.arrayBuffer !== "function")) {
+          throw new HttpError(400, `Choose between 1 and ${MAX_IMAGE_BATCH_FILES} image files.`);
+    }
+    const extensionForType = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+    let totalBytes = 0;
+    const images = [];
+    for (const file of files) {
+          if (file.size < 1 || file.size > MAX_IMAGE_FILE_BYTES) {
+                  throw new HttpError(413, "Each image must be smaller than 8 MB.");
+          }
+          totalBytes += file.size;
+          if (totalBytes > MAX_IMAGE_BATCH_BYTES) {
+                  throw new HttpError(413, "The selected images exceed the 20 MB total upload limit.");
+          }
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const actualType = detectedImageType(bytes);
+          const extension = extensionForType[actualType];
+          if (!extension || (file.type && actualType !== file.type)) {
+                  throw new HttpError(400, "Use valid JPG, PNG, or WebP image files.");
+          }
+          images.push({
+                  path: `images/${randomId()}.${extension}`,
+                  content: bytesToBase64(bytes)
+          });
+    }
+  
+    const apiBase = `https://api.github.com/repos/${repository}`;
+    const reference = await githubApiRequest(`${apiBase}/git/ref/heads/${branch}`, token);
+    const parentSha = reference.object?.sha;
+    if (typeof parentSha !== "string") throw new HttpError(502, "GitHub did not return the website branch revision.");
+    const parentCommit = await githubApiRequest(`${apiBase}/git/commits/${parentSha}`, token);
+    const baseTree = parentCommit.tree?.sha;
+    if (typeof baseTree !== "string") throw new HttpError(502, "GitHub did not return the website file tree.");
+  
+    const treeEntries = [];
+    for (const image of images) {
+          const blob = await githubApiRequest(`${apiBase}/git/blobs`, token, "POST", {
+                  content: image.content,
+                  encoding: "base64"
+          });
+          if (typeof blob.sha !== "string") throw new HttpError(502, "GitHub did not save an image file.");
+          treeEntries.push({ path: image.path, mode: "100644", type: "blob", sha: blob.sha });
+    }
+    const nextTree = await githubApiRequest(`${apiBase}/git/trees`, token, "POST", {
+          base_tree: baseTree,
+          tree: treeEntries
+    });
+    if (typeof nextTree.sha !== "string") throw new HttpError(502, "GitHub did not create the website file tree.");
+    const commit = await githubApiRequest(`${apiBase}/git/commits`, token, "POST", {
+          message: `Add ${images.length} product image${images.length === 1 ? "" : "s"}`,
+          tree: nextTree.sha,
+          parents: [parentSha]
+    });
+    if (typeof commit.sha !== "string") throw new HttpError(502, "GitHub did not create the image commit.");
+    await githubApiRequest(`${apiBase}/git/refs/heads/${branch}`, token, "PATCH", {
+          sha: commit.sha,
+          force: false
+    });
+    return { images: images.map(image => ({ path: `/${image.path}` })) };
+}
+
+
 function toService(row) {
   const imageKey = publicStaticImagePath(row.image_key);
   return {
@@ -1044,7 +1191,8 @@ async function handleApi(request, env, url) {
   }
   if (path === "/api/admin/images" && method === "POST") {
     checkOrigin(request, env);
-    throw new HttpError(410, "Image uploads are disabled. Use a static website image path.");
+    await requireAdmin(request, env);
+    return json(await uploadProductImages(request, env), 201);
   }
   if (path === "/api/admin/services" && method === "GET") {
     const result = await db.prepare("SELECT * FROM salon_services ORDER BY name").all();
