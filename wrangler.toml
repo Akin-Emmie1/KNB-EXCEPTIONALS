@@ -12,4 +12,5 @@ migrations_dir = "migrations"
 [vars]
 BUSINESS_TIMEZONE = "Africa/Lagos"
 SESSION_TTL_HOURS = "8"
+GOOGLE_REDIRECT_URI = "https://knb-exceptional.vercel.app/api/admin/auth/google/callback"
 GOOGLE_CLIENT_ID = "4668894974-2topnpevbbpjeq0djhuc5edk1l25sph9.apps.googleusercontent.com"
