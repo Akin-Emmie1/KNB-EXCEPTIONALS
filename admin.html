@@ -182,7 +182,12 @@
     <div class="panel">
       <div class="brand"><span class="brand-mark">KNB</span><span>KNB <strong>EXCEPTIONALS</strong></span></div>
       <h1 style="margin-top:24px">Admin sign in</h1>
-      <p class="muted">Continue with your authorized Google account.</p>
+      <p id="loginDescription" class="muted">Continue with your authorized Google account.</p>
+      <form id="loginForm" class="hidden">
+        <div class="field"><label for="loginEmail">Admin email</label><input id="loginEmail" type="email" autocomplete="username" required></div>
+        <div class="field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
+        <button id="loginSubmitBtn" class="btn btn-primary" type="submit">Sign in</button>
+      </form>
       <a id="googleLoginBtn" class="btn btn-primary login-link" href="/api/admin/auth/google/start">Continue with Google</a>
       <div id="loginMessage" class="notice error hidden" role="alert" aria-live="polite"></div>
     </div>
@@ -235,13 +240,13 @@
               <div class="field full">
                 <label for="mainImageFile">Main product image</label>
                 <div class="image-upload-row"><input id="mainImageFile" type="file" accept="image/jpeg,image/png,image/webp"><button id="attachMainImageBtn" class="btn btn-secondary btn-small" type="button">Attach image</button></div>
-                <span class="image-help">Choose a JPG, PNG, or WebP image up to 8 MB. Attaching it adds it to the website repository and starts a deployment.</span>
+                <span class="image-help">Choose a JPG, PNG, or WebP image up to 8 MB. Uploaded images are stored in Appwrite and shown on the storefront.</span>
                 <label for="mainImage">Main image path</label><input id="mainImage" type="text" maxlength="2048" placeholder="/images/product-name.jpg">
               </div>
               <div class="field full">
                 <label for="galleryImageFiles">Additional product images</label>
                 <div class="image-upload-row"><input id="galleryImageFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple><button id="attachGalleryImagesBtn" class="btn btn-secondary btn-small" type="button">Attach images</button></div>
-                <span class="image-help">Choose up to 10 JPG, PNG, or WebP images (8 MB each, 20 MB total). They will be added in one website deployment.</span>
+                <span class="image-help">Choose up to 10 JPG, PNG, or WebP images (8 MB each, 20 MB total).</span>
                 <label for="galleryImages">Additional image paths</label><textarea id="galleryImages" maxlength="81920" placeholder="/images/product-front.jpg&#10;/images/product-detail.jpg"></textarea>
               </div>
               <div class="field full check-row"><label><input id="productInStock" type="checkbox" checked> In stock</label></div>
@@ -336,9 +341,11 @@
     </main>
   </div>
 
-  <script>window.KMB_CONFIG = window.KMB_CONFIG || { apiBaseUrl: "/api" };</script>
+  <script src="/appwrite/config.js"></script>
+  <script src="/appwrite/browser.js"></script>
   <script>
     const API_BASE_URL = String(window.KMB_CONFIG?.apiBaseUrl || "/api").replace(/\/$/, "");
+    const APPWRITE_BACKEND = window.KMB_CONFIG?.backend === "appwrite";
     const $ = id => document.getElementById(id);
     let products = [];
     let categories = [];
@@ -357,6 +364,7 @@
     const money = value => "₦" + Number(value || 0).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     async function apiRequest(path, options = {}) {
+      if (APPWRITE_BACKEND) return window.KNB_APPWRITE.apiRequest(path, options);
       const response = await fetch(API_BASE_URL + path, { credentials: "include", ...options });
       let payload = {};
       try { payload = await response.json(); } catch { if (response.ok) throw new Error("The server returned an invalid response."); }
@@ -522,7 +530,7 @@
           $(targetId).value = paths[0];
         }
         input.value = "";
-        setMessage("formMessage", `${paths.length} image${paths.length === 1 ? "" : "s"} attached. Save the product; the images will appear after the website deployment finishes.`);
+        setMessage("formMessage", `${paths.length} image${paths.length === 1 ? "" : "s"} uploaded. Save the product to publish them.`);
       } catch (error) {
         setMessage("formMessage", error.message, true);
       } finally {
@@ -716,7 +724,13 @@
     }
 
     async function init() {
-      $("googleLoginBtn").href = API_BASE_URL + "/admin/auth/google/start";
+      $("loginForm").classList.toggle("hidden", !APPWRITE_BACKEND);
+      $("googleLoginBtn").classList.toggle("hidden", APPWRITE_BACKEND);
+      if (APPWRITE_BACKEND) {
+        $("loginDescription").textContent = "Sign in with the administrator email and password configured in Appwrite.";
+      } else {
+        $("googleLoginBtn").href = API_BASE_URL + "/admin/auth/google/start";
+      }
       const authQuery = new URLSearchParams(location.search);
       const authError = authQuery.get("authError");
       const authMessages = {
@@ -724,14 +738,36 @@
         account: "Only iderakayode@gmail.com is authorized to sign in.",
         google: "Google sign-in failed or expired. Please try again."
       };
-      if (authError) {
+      if (!APPWRITE_BACKEND && authError) {
         setMessage("loginMessage", authMessages[authError] || authMessages.google, true);
         history.replaceState(null, "", location.pathname);
       } else if (authQuery.has("auth")) {
         history.replaceState(null, "", location.pathname);
       }
+      $("loginForm").addEventListener("submit", async event => {
+        event.preventDefault();
+        const submit = $("loginSubmitBtn");
+        submit.disabled = true;
+        setMessage("loginMessage", "Signing in…");
+        try {
+          await window.KNB_APPWRITE.signIn($("loginEmail").value.trim(), $("loginPassword").value);
+          const session = await apiRequest("/admin/auth/session");
+          $("loginView").classList.add("hidden");
+          $("appView").classList.remove("hidden");
+          $("userEmail").textContent = session.admin.email;
+          $("loginPassword").value = "";
+          await loadData();
+        } catch (error) {
+          setMessage("loginMessage", error.message, true);
+        } finally {
+          submit.disabled = false;
+        }
+      });
       $("logoutBtn").addEventListener("click", async () => {
-        try { await apiRequest("/admin/auth/logout", { method: "POST" }); }
+        try {
+          if (APPWRITE_BACKEND) await window.KNB_APPWRITE.signOut();
+          else await apiRequest("/admin/auth/logout", { method: "POST" });
+        }
         catch (error) { setMessage("pageMessage", error.message, true); return; }
         $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden");
       });
@@ -750,7 +786,7 @@
         $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("userEmail").textContent = session.admin.email;
         await loadData();
       } catch (error) {
-        if (!authError && error.message !== "Please sign in as an administrator." && error.message !== "Your administrator session has expired.") {
+        if (APPWRITE_BACKEND ? error.status !== 401 : !authError && error.message !== "Please sign in as an administrator." && error.message !== "Your administrator session has expired.") {
           setMessage($("appView").classList.contains("hidden") ? "loginMessage" : "pageMessage", error.message, true);
         }
       }

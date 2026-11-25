@@ -1893,7 +1893,8 @@ body { background: var(--color-bg); color: var(--color-text); }
 <!-- Toast notifications -->
 <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
-<script>window.KMB_CONFIG = window.KMB_CONFIG || { apiBaseUrl: "/api" };</script>
+<script src="/appwrite/config.js"></script>
+<script src="/appwrite/browser.js"></script>
 <script>
 /* ============================================================
    0. CONFIGURATION — EDIT THESE VALUES
@@ -1922,8 +1923,10 @@ let businessSettings = { ...BUSINESS_DEFAULTS };
 let catalogLoadError = "";
 let isCatalogLoading = true;
 const API_BASE_URL = String(window.KMB_CONFIG?.apiBaseUrl || "/api").replace(/\/$/, "");
+const APPWRITE_BACKEND = window.KMB_CONFIG?.backend === "appwrite";
 
 async function apiRequest(path, options = {}) {
+  if (APPWRITE_BACKEND) return window.KNB_APPWRITE.apiRequest(path, options);
   const response = await fetch(API_BASE_URL + path, { credentials: "include", ...options });
   let payload = {};
   try { payload = await response.json(); } catch { if (response.ok) throw new Error("The server returned an invalid response."); }

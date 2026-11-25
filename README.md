@@ -1,8 +1,10 @@
 # KNB EXCEPTIONALS
 
-Vanilla HTML/CSS/JavaScript storefront and admin dashboard, hosted on Cloudflare Pages and backed by a Cloudflare Worker API and the existing D1 database. Product and salon service images are static website assets; this project does not use R2.
+Vanilla HTML/CSS/JavaScript storefront and admin dashboard, hosted on the existing Vercel site. Appwrite is the active backend for catalog data, appointments, settings, and product images. Adding products or uploading images in Admin does not require a GitHub commit or website redeployment. See [appwrite/README.md](./appwrite/README.md) for the Appwrite setup.
 
-## Architecture
+> The Cloudflare Worker and D1 instructions below describe the legacy rollback path; they are not the active application backend.
+
+## Legacy Cloudflare architecture
 
 - **GitHub:** source-code repository and deployment source for Cloudflare Pages.
 - **Cloudflare Pages:** serves `index.html`, `admin.html`, and the static image files committed with the site.

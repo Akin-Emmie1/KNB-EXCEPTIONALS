@@ -1,0 +1,27 @@
+{
+  "projectId": "6b044bc8002081f05a75",
+  "endpoint": "https://fra.cloud.appwrite.io/v1",
+  "functions": [
+    {
+      "$id": "knb-api",
+      "name": "KNB Exceptionals API",
+      "runtime": "node-22",
+      "path": "appwrite/function",
+      "entrypoint": "src/main.js",
+      "commands": "npm install",
+      "execute": ["any"],
+      "events": [],
+      "schedule": "",
+      "timeout": 120,
+      "enabled": true,
+      "logging": true,
+      "scopes": ["rows.read", "rows.write", "files.write"],
+      "vars": [
+        {
+          "key": "KNB_ALLOWED_ORIGINS",
+          "value": "https://knb-exceptional.vercel.app,http://localhost:8765"
+        }
+      ]
+    }
+  ]
+}

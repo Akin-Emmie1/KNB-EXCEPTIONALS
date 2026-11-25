@@ -3,6 +3,7 @@
 Thumbs.db
 .env
 .env.*
+appwrite.apikey
 !.env.example
 .dev.vars*
 !.dev.vars.example
