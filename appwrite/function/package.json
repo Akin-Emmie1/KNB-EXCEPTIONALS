@@ -1,0 +1,9 @@
+{
+  "name": "knb-appwrite-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/main.js",
+    "test": "node --test"
+  }
+}
